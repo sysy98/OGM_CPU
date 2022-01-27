@@ -5,7 +5,7 @@ grid:
   cell:
     size: 0.25
     height: 0.15
-  segments: 550
+  segments: 1100
 
 ransac:
   tolerance: 0.2

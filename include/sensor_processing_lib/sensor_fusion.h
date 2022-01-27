@@ -40,23 +40,21 @@ struct Parameters{
 	float grid_range_min;
 	float grid_range_max;
 	float grid_cell_size;
-	int width_grid;
-	int height_grid;
-	int grid_segments;
-	int grid_bins;
-
-	int occ_width_grid;
-    int occ_height_grid;
-
 	float grid_cell_height;
 
+	int grid_segments;
+	int grid_bins;
+	int polar_grid_num;
 	float inv_angular_res;
 	float inv_radial_res;
 
-	float lidar_height;
-	float lidar_opening_angle;
-	float lidar_z_min;
+	int width_grid;
+	int height_grid;
+	int occ_width_grid;
+    int occ_height_grid;
 
+	float lidar_height;
+	float lidar_z_min;
 	float ransac_tolerance;
 	int ransac_iterations;
 
@@ -79,9 +77,9 @@ struct PolarCell{
 
 	// Default constructor.
 	PolarCell():
-		z_min(0.0), z_max(0.0), height(0.0), dist(0.0), count(0), 
-		elevated_count(0), p_occ(0.0), p_free(0.5), p_final(0.0), 
-		p_logit(0.0)
+		z_min(0), z_max(0), height(0), dist(0), count(0), 
+		elevated_count(0), p_occ(0), p_free(0), p_final(0), 
+		p_logit(0)
 	{}
 };
 
@@ -107,32 +105,22 @@ private:
 	// Class members
 	Parameters params_;
 	float width_gain_;  // 2
-    float height_gain_; // 3.5
+    float height_gain_; // 1.5
 
-	static int time_frame_;
+	static int frame_count_;
     static ros::Time cloud_stamp_;
 	static Eigen::Matrix4f transMat;
 
 	VPointCloud::Ptr pcl_in_;
 	VPointCloud::Ptr pcl_ground_plane_;
-	VPointCloud::Ptr pcl_ground_plane_inliers_;
-	VPointCloud::Ptr pcl_ground_plane_outliers_;
-	VPointCloud::Ptr pcl_ground_;
 	VPointCloud::Ptr pcl_elevated_;
 
 	std::vector< std::vector<int> > polar_measurements_;
-	std::vector< std::vector<PolarCell> > polar_grid_;
-	std::vector< float > whole_grid_probs_;
-	OccupancyGrid::Ptr tmp_grid_;
+	std::vector<PolarCell> polar_grid_;
+	std::vector<float> whole_grid_probs_;
 	OccupancyGrid::Ptr occ_grid_;
 
 	// Publisher
-	ros::Publisher cloud_filtered_pub_;
-	ros::Publisher cloud_ground_plane_inliers_pub_;
-	ros::Publisher cloud_ground_plane_outliers_pub_;
-	ros::Publisher cloud_ground_pub_;
-	ros::Publisher cloud_elevated_pub_;
-	ros::Publisher tmp_occupancy_pub_;
 	ros::Publisher grid_occupancy_pub_;
 	ros::Publisher point_pub_;
 	ros::Publisher fix_point_pub_;
@@ -155,11 +143,10 @@ private:
 	void fixedPoint(const int grid_x, const int grid_y);
 
 	// Conversion functions
-	void fromVeloCoordsToPolarInfo(const float x, const float y, 
-	int & seg, int & bin, float & mag);
-	
-	void fromVeloCoordsToPolarCell(const float x, const float y,
-		int & seg, int & bin);
+	inline int from2dPolarIndexTo1d(const int seg, const int bin);
+
+	void fromVeloCoordsToPolarCell(const float x, const float y, 
+	int & seg, int & polar_id, float & mag);
 	
 	void fromPolarCellToVeloCoords(const int seg, const int bin,
 		float & x, float & y);

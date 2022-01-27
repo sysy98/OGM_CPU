@@ -8,29 +8,29 @@
 #include <sensor_processing_lib/sensor_fusion.h>
 #include <math.h>
 #include <algorithm>
-#include <time.h>
+#include <chrono>
 
 
 namespace sensor_processing
 {
 
 	ros::Time SensorFusion::cloud_stamp_{};                 // cloud stamp
-	int SensorFusion::time_frame_{};                        // init counter for publishing
+	int SensorFusion::frame_count_{};                        // init counter for publishing
 	Matrix4f SensorFusion::transMat = Matrix4f::Identity(); // init transformation matrix
 
+	// Initialize process duration
+	std::chrono::microseconds total_dur{};
+	std::chrono::microseconds main_dur{};
 	/******************************************************************************/
 	SensorFusion::SensorFusion(ros::NodeHandle nh, ros::NodeHandle private_nh) : nh_(nh),
 																				 private_nh_(private_nh),
 																				 pcl_in_(new VPointCloud),
 																				 pcl_ground_plane_(new VPointCloud),
-																				 pcl_ground_plane_inliers_(new VPointCloud),
-																				 pcl_ground_plane_outliers_(new VPointCloud),
-																				 pcl_ground_(new VPointCloud),
 																				 pcl_elevated_(new VPointCloud),
 																				 cloud_sub_(nh, "/kitti/velo/pointcloud", 10),
 																				 tf_listener_(buffer_),
 																				 width_gain_(2),
-																				 height_gain_(3.5)
+																				 height_gain_(1.5)
 	{
 
 		// Get data path
@@ -62,7 +62,6 @@ namespace sensor_processing
 						  params_.lidar_height);
 		private_nh_.param("lidar/z_min", params_.lidar_z_min,
 						  params_.lidar_z_min);
-		params_.lidar_opening_angle = M_PI / 2;
 
 		// Define grid parameters
 		private_nh_.param("grid/range/min", params_.grid_range_min,
@@ -75,11 +74,14 @@ namespace sensor_processing
 						  params_.grid_cell_height);
 		private_nh_.param("grid/segments", params_.grid_segments,
 						  params_.grid_segments);
-		params_.height_grid = params_.grid_range_max / params_.grid_cell_size;
-		params_.width_grid = params_.height_grid * 2;
+
 		params_.grid_bins = (params_.grid_range_max * std::sqrt(2)) /
-								params_.grid_cell_size +
-							1;
+								params_.grid_cell_size + 1;
+		params_.polar_grid_num = params_.grid_segments * params_.grid_bins;
+
+		// 360-degree grid map
+		params_.height_grid = params_.grid_range_max / params_.grid_cell_size * 2;
+		params_.width_grid = params_.height_grid;
 
 		// Define ransac ground plane parameters
 		private_nh_.param("ransac/tolerance", params_.ransac_tolerance,
@@ -88,7 +90,7 @@ namespace sensor_processing
 						  params_.ransac_iterations);
 
 		// Define static conversion values
-		params_.inv_angular_res = params_.grid_segments / (2 * params_.lidar_opening_angle);
+		params_.inv_angular_res = params_.grid_segments / (2 * M_PI);
 		params_.inv_radial_res = 1.0f / params_.grid_cell_size;
 
 		// Print parameters
@@ -109,22 +111,7 @@ namespace sensor_processing
 		ROS_INFO_STREAM("inv_radial_res " << params_.inv_radial_res);
 
 		// Define polar grid
-		polar_grid_ = std::vector<std::vector<PolarCell>>(params_.grid_segments,
-														  std::vector<PolarCell>(params_.grid_bins));
-
-		// tmp OGM
-		tmp_grid_ = boost::make_shared<OccupancyGrid>();
-		tmp_grid_->data.resize(params_.width_grid * params_.height_grid);
-		tmp_grid_->info.width = uint32_t(params_.height_grid);
-		tmp_grid_->info.height = uint32_t(params_.width_grid);
-		tmp_grid_->info.resolution = float(params_.grid_cell_size);
-		tmp_grid_->info.origin.position.x = 0;
-		tmp_grid_->info.origin.position.y = -params_.grid_range_max;
-		tmp_grid_->info.origin.position.z = params_.lidar_height;
-		tmp_grid_->info.origin.orientation.w = 1;
-		tmp_grid_->info.origin.orientation.x = 0;
-		tmp_grid_->info.origin.orientation.y = 0;
-		tmp_grid_->info.origin.orientation.z = 0;
+		polar_grid_ = std::vector<PolarCell>(params_.polar_grid_num);
 
 		// final OGM
 		params_.occ_width_grid = width_gain_ * params_.width_grid;
@@ -145,28 +132,12 @@ namespace sensor_processing
 		whole_grid_probs_ = std::vector<float>(params_.occ_height_grid * params_.occ_width_grid, 0.0);
 
 		// Init occupancy grid
-		for (int i = 0; i < params_.height_grid * params_.width_grid; ++i)
-		{
-			tmp_grid_->data[i] = -1;
-		}
 		for (int i = 0; i < params_.occ_width_grid * params_.occ_height_grid; ++i)
 		{
 			occ_grid_->data[i] = -1;
 		}
 
 		// Define Publisher
-		cloud_filtered_pub_ = nh_.advertise<PointCloud2>(
-			"/sensor/cloud/filtered", 2);
-		cloud_ground_plane_inliers_pub_ = nh_.advertise<PointCloud2>(
-			"/sensor/cloud/groundplane/inliers", 2);
-		cloud_ground_plane_outliers_pub_ = nh_.advertise<PointCloud2>(
-			"/sensor/cloud/groundplane/outliers", 2);
-		cloud_ground_pub_ = nh_.advertise<PointCloud2>(
-			"/sensor/cloud/ground", 2);
-		cloud_elevated_pub_ = nh_.advertise<PointCloud2>(
-			"/sensor/cloud/elevated", 2);
-		tmp_occupancy_pub_ = nh_.advertise<OccupancyGrid>(
-			"/sensor/grid/tmp_occupancy", 2);
 		grid_occupancy_pub_ = nh_.advertise<OccupancyGrid>(
 			"/sensor/grid/occupancy", 2);
 		point_pub_ = nh_.advertise<PointStamped>(
@@ -183,22 +154,24 @@ namespace sensor_processing
 	void SensorFusion::process(
 		const PointCloud2::ConstPtr &cloud)
 	{
-
+		auto startPost = std::chrono::high_resolution_clock::now();
 		cloud_stamp_ = cloud->header.stamp;
+
 		calculateTransMatrix();
 
 		// Preprocess point cloud
 		processPointCloud(cloud);
 
-		// Print sensor fusion
-		ROS_INFO("Publishing Sensor Fusion [%d]: # PCL points [%d] # Ground [%d]"
-				 " # Elevated [%d] ",
-				 time_frame_,
-				 int(pcl_in_->size()), int(pcl_ground_->size()),
-				 int(pcl_elevated_->size()));
+	    auto endPost = std::chrono::high_resolution_clock::now();
 
+		// sum the total time
+    	total_dur += std::chrono::duration_cast<std::chrono::microseconds>(endPost - startPost);
+
+		std::cout << "Average time (whole process): " << std::fixed << std::setprecision(2) << double(total_dur.count()) / (frame_count_ + 1) / 1000 << "ms"
+				<< "(main process part): " << std::fixed << std::setprecision(2) << double(main_dur.count()) / (frame_count_ + 1) / 1000 << "ms" << std::endl;
+		
 		// Increment time frame
-		time_frame_++;
+		frame_count_++;
 	}
 
 	void SensorFusion::processPointCloud(const PointCloud2::ConstPtr &cloud)
@@ -217,8 +190,7 @@ namespace sensor_processing
 		pcl::ExtractIndices<VPoint> pcl_extractor;
 
 		// Define polar grid
-		polar_grid_ = std::vector<std::vector<PolarCell>>(params_.grid_segments,
-														  std::vector<PolarCell>(params_.grid_bins));
+		polar_grid_ = std::vector<PolarCell>(params_.polar_grid_num, PolarCell());
 
 		// Loop through input point cloud
 		for (int i = 0; i < pcl_in_->size(); ++i)
@@ -227,56 +199,51 @@ namespace sensor_processing
 			// Read current point
 			VPoint &point = pcl_in_->at(i);
 
-			// Determine angle of lidar point and check
-			float angle = std::abs(std::atan2(point.y, point.x));
-			if (angle < params_.lidar_opening_angle)
+			// Determine range of lidar point and check
+			float range = std::sqrt(point.x * point.x + point.y * point.y);
+			if (range > params_.grid_range_min &&
+				range < params_.grid_range_max)
 			{
 
-				// Determine range of lidar point and check
-				float range = std::sqrt(point.x * point.x + point.y * point.y);
-				if (range > params_.grid_range_min &&
-					range < params_.grid_range_max)
+				// Check height of lidar point
+				if (point.z > params_.lidar_z_min)
 				{
 
-					// Check height of lidar point
-					if (point.z > params_.lidar_z_min)
+					// Add index for filtered point cloud
+					pcl_inliers->indices.push_back(i);
+
+					// Buffer variables
+					int seg, polar_id;
+					float mag;
+
+					// Get polar grid cell indices
+					fromVeloCoordsToPolarCell(point.x, point.y, seg, polar_id, mag);
+
+					// Grab cell
+					PolarCell &cell = polar_grid_[polar_id];
+
+					// Increase count
+					cell.count++;
+
+					// Update min max
+					if (cell.count == 1)
 					{
-
-						// Add index for filtered point cloud
-						pcl_inliers->indices.push_back(i);
-
-						// Buffer variables
-						int seg, bin;
-
-						// Get polar grid cell indices
-						fromVeloCoordsToPolarCell(point.x, point.y, seg, bin);
-
-						// Grab cell
-						PolarCell &cell = polar_grid_[seg][bin];
-
-						// Increase count
-						cell.count++;
-
-						// Update min max
-						if (cell.count == 1)
+						cell.x_min = point.x;
+						cell.y_min = point.y;
+						cell.z_min = point.z;
+						cell.z_max = point.z;
+					}
+					else
+					{
+						if (point.z < cell.z_min)
 						{
 							cell.x_min = point.x;
 							cell.y_min = point.y;
 							cell.z_min = point.z;
-							cell.z_max = point.z;
 						}
-						else
+						if (point.z > cell.z_max)
 						{
-							if (point.z < cell.z_min)
-							{
-								cell.x_min = point.x;
-								cell.y_min = point.y;
-								cell.z_min = point.z;
-							}
-							if (point.z > cell.z_max)
-							{
-								cell.z_max = point.z;
-							}
+							cell.z_max = point.z;
 						}
 					}
 				}
@@ -292,7 +259,6 @@ namespace sensor_processing
 		// Publish filtered cloud
 		pcl_in_->header.frame_id = cloud->header.frame_id;
 		pcl_in_->header.stamp = pcl_conversions::toPCL(cloud->header.stamp);
-		cloud_filtered_pub_.publish(pcl_in_);
 
 		/******************************************************************************
  * 2. Ground plane estimation and dividing point cloud in elevated and ground
@@ -307,7 +273,8 @@ namespace sensor_processing
 			{
 
 				// Grab cell
-				PolarCell &cell = polar_grid_[i][j];
+				int polar_id = from2dPolarIndexTo1d(i, j);
+				PolarCell &cell = polar_grid_[polar_id];
 
 				// Check if cell can be ground cell
 				if (cell.count > 0 &&
@@ -335,17 +302,6 @@ namespace sensor_processing
 		segmentation.setInputCloud(pcl_ground_plane_->makeShared());
 		segmentation.segment(*inliers, *coefficients);
 
-		// Divide ground plane cloud in inlier cloud and outlier cloud
-		pcl_extractor.setInputCloud(pcl_ground_plane_);
-		pcl_extractor.setIndices(inliers);
-		pcl_extractor.setNegative(false);
-		pcl_extractor.filter(*pcl_ground_plane_inliers_);
-
-		pcl_extractor.setInputCloud(pcl_ground_plane_);
-		pcl_extractor.setIndices(inliers);
-		pcl_extractor.setNegative(true);
-		pcl_extractor.filter(*pcl_ground_plane_outliers_);
-
 		// Sanity check
 		if (inliers->indices.empty() || coefficients->values[3] > 2 ||
 			coefficients->values[3] < 1.5)
@@ -355,25 +311,6 @@ namespace sensor_processing
 					 int(inliers->indices.size()),
 					 coefficients->values[3]);
 		}
-
-		// Publish ground plane inliers and outliers point cloud
-		pcl_ground_plane_inliers_->header.frame_id = cloud->header.frame_id;
-		pcl_ground_plane_inliers_->header.stamp =
-			pcl_conversions::toPCL(cloud->header.stamp);
-		cloud_ground_plane_inliers_pub_.publish(pcl_ground_plane_inliers_);
-
-		pcl_ground_plane_outliers_->header.frame_id = cloud->header.frame_id;
-		pcl_ground_plane_outliers_->header.stamp =
-			pcl_conversions::toPCL(cloud->header.stamp);
-		cloud_ground_plane_outliers_pub_.publish(pcl_ground_plane_outliers_);
-
-		// Print
-		ROS_INFO("Ground plane estimation [%d] # Points [%d] # Inliers [%d] "
-				 " C [%f][%f][%f][%f]",
-				 time_frame_,
-				 int(pcl_ground_plane_->size()), int(pcl_ground_plane_inliers_->size()),
-				 coefficients->values[0], coefficients->values[1],
-				 coefficients->values[2], coefficients->values[3]);
 
 		/******************************************************************************
  * 3. Divide filtered point cloud in elevated and ground
@@ -385,7 +322,8 @@ namespace sensor_processing
 			{
 
 				// Grab cell
-				PolarCell &cell = polar_grid_[s][b];
+				int polar_id = from2dPolarIndexTo1d(s, b);
+				PolarCell &cell = polar_grid_[polar_id];
 				float x, y;
 
 				//Calcluate distance between the cell and the origin of lidar
@@ -396,7 +334,7 @@ namespace sensor_processing
 				//Get ground height
 				cell.ground = (-coefficients->values[0] * x -
 							   coefficients->values[1] * y - coefficients->values[3]) /
-							  coefficients->values[2];
+							   coefficients->values[2];
 
 				//if cell is not filled
 				if (cell.count == 0)
@@ -404,11 +342,10 @@ namespace sensor_processing
 
 				//Calculate cell height
 				else
-					cell.height = polar_grid_[s][b].z_max - cell.ground;
+					cell.height = cell.z_max - cell.ground;
 			}
 		}
 
-		pcl_ground_->points.clear();
 		pcl_elevated_->points.clear();
 
 		for (int i = 0; i < pcl_in_->size(); ++i)
@@ -418,33 +355,27 @@ namespace sensor_processing
 			VPoint point = pcl_in_->at(i);
 
 			//Buffer variables
-			int seg, bin;
+			int seg, polar_id;
+			float mag;
 
 			// Get polar grid cell indices
-			fromVeloCoordsToPolarCell(point.x, point.y, seg, bin);
+			fromVeloCoordsToPolarCell(point.x, point.y, seg, polar_id, mag);
 
 			// Grab cell
-			PolarCell &cell = polar_grid_[seg][bin];
+			PolarCell &cell = polar_grid_[polar_id];
 
 			if (point.z > cell.ground && cell.height > params_.grid_cell_height)
 			{
 				pcl_elevated_->points.push_back(point);
 			}
-			else
-			{
-				pcl_ground_->points.push_back(point);
-			}
 		}
 
-		//Publish ground cloud
-		pcl_ground_->header.frame_id = cloud->header.frame_id;
-		pcl_ground_->header.stamp = pcl_conversions::toPCL(cloud->header.stamp);
-		cloud_ground_pub_.publish(pcl_ground_);
-
-		//Publish elevated cloud
 		pcl_elevated_->header.frame_id = cloud->header.frame_id;
 		pcl_elevated_->header.stamp = pcl_conversions::toPCL(cloud->header.stamp);
-		cloud_elevated_pub_.publish(pcl_elevated_);
+
+		// Print point cloud information
+    	ROS_INFO("Point Cloud [%d] # Total points [%d] # Elevated points [%d] ",
+             frame_count_, int(pcl_in_->size()), int(pcl_elevated_->size()));
 
 		/******************************************************************************
  * 4. Use elevated point cloud to calculate occupied probability of cells in polar grid
@@ -461,20 +392,20 @@ namespace sensor_processing
 			VPoint &point = pcl_elevated_->at(i);
 
 			//Buffer variables
-			int seg, bin;
+			int seg, polar_id;
 			float point_dist;
 
-			fromVeloCoordsToPolarInfo(point.x, point.y, seg, bin, point_dist);
+			fromVeloCoordsToPolarCell(point.x, point.y, seg, polar_id, point_dist);
 
 			// if(i==0) printf("%d* ", seg);
-			PolarCell &cell = polar_grid_[seg][bin];
+			PolarCell &cell = polar_grid_[polar_id];
 			cell.elevated_count++;
 		
 			// Calculate p_occ with the normal distribuiton.
 			for (int j = 0; j < params_.grid_bins; ++j)
 			{
-
-				PolarCell &cell = polar_grid_[seg][j];
+				int tmp_polar_id = from2dPolarIndexTo1d(seg, j);
+				PolarCell &cell = polar_grid_[tmp_polar_id];
 
 				// float alpha = log10 (500 / point_dist);
 				float alpha = 1;
@@ -493,8 +424,8 @@ namespace sensor_processing
 
 			for (int j = 0; j < params_.grid_bins; ++j)
 			{
-
-				PolarCell &cell = polar_grid_[i][j];
+				int polar_id = from2dPolarIndexTo1d(i, j);
+				PolarCell &cell = polar_grid_[polar_id];
 
 				// Perform nonlinear normalization of p_occ in the range of 0-1.
 				cell.p_occ = std::atan(cell.p_occ) * 2 / M_PI;
@@ -522,7 +453,8 @@ namespace sensor_processing
 			for (int j = 0; j < params_.grid_bins; ++j)
 			{
 
-				PolarCell &cell = polar_grid_[i][j];
+				int polar_id = from2dPolarIndexTo1d(i, j);
+				PolarCell &cell = polar_grid_[polar_id];
 
 				//The probability of the cell behind the first detected object is unknown(0.5).
 				if (j > first_occ_cell_bin)
@@ -536,10 +468,11 @@ namespace sensor_processing
 		}
 		/******************************************************************************
  * 5. Map polar grid back to cartesian occupancy grid
- */
-		fixedPoint(0, 0);
+ */		
+		auto main_part_start = std::chrono::high_resolution_clock::now();
+
 		// Go through cartesian grid(occ_grid_)
-		float x1 = params_.grid_cell_size / 2;
+		float x1 = -params_.grid_range_max + params_.grid_cell_size / 2;
 		for (int i = 0; i < params_.height_grid; ++i, x1 += params_.grid_cell_size)
 		{
 
@@ -548,12 +481,13 @@ namespace sensor_processing
 			{
 
 				//Buffer variables
-				int seg, bin;
+				int seg, polar_id;
+				float mag;
 
 				//Get polar grid indices
-				fromVeloCoordsToPolarCell(x1, y1, seg, bin);
+				fromVeloCoordsToPolarCell(x1, y1, seg, polar_id, mag);
 
-				PolarCell &cell = polar_grid_[seg][bin];
+				PolarCell &cell = polar_grid_[polar_id];
 
 				// Calculate occupancy grid cell index
 				int final_grid_index;
@@ -578,8 +512,11 @@ namespace sensor_processing
 				}
 			}
 		}
-		endTime = clock();
-		std::cout << "Total Time : " <<(double)(endTime - startTime) / CLOCKS_PER_SEC * 1000 << "ms" << std::endl;
+		
+		auto main_part_end = std::chrono::high_resolution_clock::now();
+
+		// Sum the processing time for the main part
+		main_dur += std::chrono::duration_cast<std::chrono::microseconds>(main_part_end - main_part_start);
 
 		// Publish occupancy grid
 		occ_grid_->header.stamp = cloud->header.stamp;
@@ -587,41 +524,7 @@ namespace sensor_processing
 		occ_grid_->info.map_load_time = cloud->header.stamp;
 		grid_occupancy_pub_.publish(occ_grid_);
 
-		/*
-	// Go through cartesian grid(tmp_grid_)
-	float y = -params_.grid_range_max + params_.grid_cell_size / 2;
-	for(int j = 0; j < params_.width_grid; ++j, y += params_.grid_cell_size){
-
-		float x = params_.grid_cell_size / 2;
-		for(int i = 0; i < params_.height_grid; ++i, x += params_.grid_cell_size){
-			
-			//Buffer variables
-			int seg, bin;
-
-			//Get polar grid indices
-			fromVeloCoordsToPolarCell(x, y, seg, bin);
-
-			PolarCell & cell = polar_grid_[seg][bin];
-
-			int cell_index = j * params_.height_grid + i;
-
-			if(cell.p_logit == 0){
-				tmp_grid_->data[cell_index] = -1;
-			}
-			else if(cell.p_logit < 0){
-				tmp_grid_->data[cell_index] = 0;
-			}
-			else{
-				tmp_grid_->data[cell_index] = 100;
-			}
-		}
-	}
-
-	// tmp_grid_->header.stamp = cloud->header.stamp;
-	// tmp_grid_->header.frame_id = cloud->header.frame_id;
-	// tmp_grid_->info.map_load_time = tmp_grid_->header.stamp;
-	// tmp_occupancy_pub_.publish(tmp_grid_);
-*/
+		fixedPoint(0, 0);
 	}
 
 	void SensorFusion::calculateTransMatrix()
@@ -666,7 +569,7 @@ namespace sensor_processing
 													 float &x, float &y)
 	{
 
-		x = (grid_x + 0.5) * params_.grid_cell_size;
+		x = (grid_x + 0.5 - params_.height_grid / 2) * params_.grid_cell_size;
 		y = (grid_y + 0.5 - params_.width_grid / 2) * params_.grid_cell_size;
 	}
 
@@ -695,32 +598,20 @@ namespace sensor_processing
 		fix_point_pub_.publish(p);
 	}
 
-	void SensorFusion::fromVeloCoordsToPolarInfo(const float x, const float y,
-												 int &seg, int &bin, float &mag)
+	inline int SensorFusion::from2dPolarIndexTo1d(const int seg, const int bin)
 	{
-
-		float ang = -std::atan2(y, x);
-		mag = std::sqrt(x * x + y * y);
-		seg = int((ang + params_.lidar_opening_angle) * params_.inv_angular_res);
-		bin = int(mag * params_.inv_radial_res);
-
-		// For last segment
-		if (x == 0 && y < 0)
-			seg = params_.grid_segments - 1;
+		return seg * params_.grid_bins + bin;
 	}
 
 	void SensorFusion::fromVeloCoordsToPolarCell(const float x, const float y,
-												 int &seg, int &bin)
+												 int &seg, int &polar_id, float &mag)
 	{
 
-		float mag = std::sqrt(x * x + y * y);
-		float ang = -std::atan2(y, x);
-		seg = int((ang + params_.lidar_opening_angle) * params_.inv_angular_res);
-		bin = int(mag * params_.inv_radial_res);
-
-		// For last segment
-		if (x == 0 && y < 0)
-			seg = params_.grid_segments - 1;
+		float ang = std::atan2(x, y);
+		mag = std::sqrt(x * x + y * y);
+		seg = int((ang + M_PI) * params_.inv_angular_res);
+		int bin = int(mag * params_.inv_radial_res);
+		polar_id = from2dPolarIndexTo1d(seg, bin);
 	}
 
 	void SensorFusion::fromPolarCellToVeloCoords(const int seg, const int bin,
@@ -728,8 +619,8 @@ namespace sensor_processing
 	{
 
 		float mag = bin / params_.inv_radial_res + params_.grid_cell_size / 2;
-		float ang = seg / params_.inv_angular_res - params_.lidar_opening_angle;
-		y = -std::sin(ang) * mag;
-		x = std::cos(ang) * mag;
+		float ang = seg / params_.inv_angular_res - M_PI;
+		x = std::sin(ang) * mag;
+    	y = std::cos(ang) * mag;
 	}
 } // namespace sensor_processing
