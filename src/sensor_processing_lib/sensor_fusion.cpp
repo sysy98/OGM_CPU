@@ -519,11 +519,6 @@ namespace sensor_processing
 			if (!has_obstacle_this_seg)
 				continue;
 
-			// Calculate the position of the first detected object in each segment.
-			PolarCell &cell = polar_grid_[i][first_occ_cell_bin];
-
-			cell.p_free = 0.5 + cell.elevated_count * 0.05;
-
 			for (int j = 0; j < params_.grid_bins; ++j)
 			{
 
@@ -539,18 +534,6 @@ namespace sensor_processing
 				cell.p_logit = log(cell.p_final / (1 - cell.p_final));
 			}
 		}
-
-		// for (int i = 0; i < params_.grid_segments; ++i){
-		// 	for (int j = 0; j < params_.grid_bins; ++j){
-				
-		// 		if(i == 25 && 10 < j < 15){
-		// 			PolarCell &cell = polar_grid_[i][j];
-
-		// 			printf("polar_id:%d, occ:%f, free:%f, final:%f, logit:%f \n  ", 
-		// 			i * params_.grid_bins + j, cell.p_occ, cell.p_free, cell.p_final, cell.p_logit);
-		// 		}
-		// 	}
-		// }
 		/******************************************************************************
  * 5. Map polar grid back to cartesian occupancy grid
  */
@@ -576,9 +559,6 @@ namespace sensor_processing
 				int final_grid_index;
 
 				fromLocalOgmToFinalOgm(i, j, final_grid_index);
-
-				if(j == 0 && i == 0)
-					printf("velo_x: %f, velo_y: %f, seg:%d, polar_id:%d, final_id:%d \n  ",x1, y1, seg, seg * params_.grid_bins + bin, final_grid_index);
 
 				whole_grid_probs_[final_grid_index] += cell.p_logit;
 

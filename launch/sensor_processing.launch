@@ -7,7 +7,7 @@
   <arg name="scenario" default="0000"/>
 
   <!-- Choose replay speed -->
-  <arg name="speed" default="0.25"/>
+  <arg name="speed" default="0.5"/>
 
   <!-- Choose replay delay -->
   <arg name="delay" default="1" />

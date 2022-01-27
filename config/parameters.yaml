@@ -7,13 +7,6 @@ grid:
     height: 0.15
   segments: 550
 
-semantic:
-  edge_detection:
-    perform: false
-    min: 5
-    max: 120
-    kernel: 3
-
 ransac:
   tolerance: 0.2
   iterations: 50
