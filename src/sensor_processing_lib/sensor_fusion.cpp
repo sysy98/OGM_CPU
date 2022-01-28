@@ -381,8 +381,6 @@ namespace sensor_processing
 		clock_t startTime,endTime;
 		startTime = clock();
 
-		int time{0};
-
 		for (int i = 0; i < pcl_elevated_->size(); ++i)
 		{
 
