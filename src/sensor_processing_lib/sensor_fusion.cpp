@@ -378,8 +378,7 @@ namespace sensor_processing
 		/******************************************************************************
  * 4. Use elevated point cloud to calculate occupied probability of cells in polar grid
  */
-		clock_t startTime,endTime;
-		startTime = clock();
+		auto main_part_start = std::chrono::high_resolution_clock::now();
 
 		for (int i = 0; i < pcl_elevated_->size(); ++i)
 		{
@@ -392,8 +391,6 @@ namespace sensor_processing
 			float point_dist;
 
 			fromVeloCoordsToPolarCell(point.x, point.y, seg, polar_id, point_dist);
-
-			// if(i==0) printf("%d* ", seg);
 			PolarCell &cell = polar_grid_[polar_id];
 			cell.elevated_count++;
 		
@@ -403,7 +400,6 @@ namespace sensor_processing
 				int tmp_polar_id = from2dPolarIndexTo1d(seg, j);
 				PolarCell &cell = polar_grid_[tmp_polar_id];
 
-				// float alpha = log10 (500 / point_dist);
 				float alpha = 1;
 				float delta = 0.25;
 				float occ_value = alpha / sqrt(2 * M_PI * delta) *
@@ -463,10 +459,8 @@ namespace sensor_processing
 			}
 		}
 		/******************************************************************************
- * 5. Map polar grid back to cartesian occupancy grid
- */		
-		auto main_part_start = std::chrono::high_resolution_clock::now();
-
+	 * 5. Map polar grid back to cartesian occupancy grid
+	 */		
 		// Go through cartesian grid(occ_grid_)
 		float x1 = -params_.grid_range_max + params_.grid_cell_size / 2;
 		for (int i = 0; i < params_.height_grid; ++i, x1 += params_.grid_cell_size)
