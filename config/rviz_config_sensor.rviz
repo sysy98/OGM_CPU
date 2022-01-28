@@ -154,12 +154,12 @@ Visualization Manager:
       Value: false
     - Alpha: 1
       Class: rviz/PointStamped
-      Color: 136; 138; 133
+      Color: 204; 0; 0
       Enabled: true
       History Length: 1
       Name: PointStamped
       Radius: 2
-      Topic: /fixed_point
+      Topic: /vehicle_pose
       Unreliable: false
       Value: true
     - Class: rviz/Image
@@ -202,7 +202,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 104.49630737304688
+      Distance: 67.99462890625
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -240,5 +240,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1855
-  X: 79
-  Y: 27
+  X: 200
+  Y: 156

@@ -140,10 +140,8 @@ namespace sensor_processing
 		// Define Publisher
 		grid_occupancy_pub_ = nh_.advertise<OccupancyGrid>(
 			"/sensor/grid/occupancy", 2);
-		point_pub_ = nh_.advertise<PointStamped>(
-			"/new_point", 2);
-		fix_point_pub_ = nh_.advertise<PointStamped>(
-			"/fixed_point", 2);
+		vehicle_pos_pub_ = nh_.advertise<PointStamped>(
+			"/vehicle_pose", 2);
 
 		// Define Subscriber
 		cloud_sub_.registerCallback(boost::bind(&SensorFusion::process, this, _1));
@@ -524,7 +522,14 @@ namespace sensor_processing
 		occ_grid_->info.map_load_time = cloud->header.stamp;
 		grid_occupancy_pub_.publish(occ_grid_);
 
-		fixedPoint(0, 0);
+		// Publish vehicle pose
+		Vector4f vehicle_vec = transMat * Vector4f(0, 0, 0, 1);
+		vehicle_pos_.header.frame_id = "world";
+		vehicle_pos_.header.stamp = cloud_stamp_;
+		vehicle_pos_.point.x = vehicle_vec[0];
+		vehicle_pos_.point.y = vehicle_vec[1];
+		vehicle_pos_.point.z = 0;
+		vehicle_pos_pub_.publish(vehicle_pos_);	
 	}
 
 	void SensorFusion::calculateTransMatrix()
@@ -556,21 +561,18 @@ namespace sensor_processing
 	{
 
 		float final_x, final_y;
-		fromLocalGridToFinalCartesian(local_grid_x, local_grid_y, final_x, final_y);
-
-		Vector4f new_vec = transMat * Vector4f(final_x, final_y, 0, 1);
-		final_x = new_vec[0];
-		final_y = new_vec[1];
-
+		fromLocalGridToGlobalCartesian(local_grid_x, local_grid_y, final_x, final_y);
 		fromFinalCartesianToGridIndex(final_x, final_y, final_grid_index);
 	}
 
-	void SensorFusion::fromLocalGridToFinalCartesian(const int grid_x, const int grid_y,
-													 float &x, float &y)
+	void SensorFusion::fromLocalGridToGlobalCartesian(const int grid_x, const int grid_y,
+													 float &global_x, float &global_y)
 	{
-
-		x = (grid_x + 0.5 - params_.height_grid / 2) * params_.grid_cell_size;
-		y = (grid_y + 0.5 - params_.width_grid / 2) * params_.grid_cell_size;
+		float x = (grid_x + 0.5 - params_.height_grid / 2) * params_.grid_cell_size;
+		float y = (grid_y + 0.5 - params_.width_grid / 2) * params_.grid_cell_size;
+		Vector4f new_vec = transMat * Vector4f(x, y, 0, 1);
+		global_x = new_vec[0];
+		global_y = new_vec[1];
 	}
 
 	void SensorFusion::fromFinalCartesianToGridIndex(const float x, const float y,
@@ -585,17 +587,6 @@ namespace sensor_processing
 
 			grid_index = grid_y * params_.occ_height_grid + grid_x;
 		}
-	}
-
-	void SensorFusion::fixedPoint(const int point_x, const int point_y)
-	{
-		geometry_msgs::PointStamped p;
-		p.header.frame_id = "world";
-		p.header.stamp = cloud_stamp_;
-		p.point.x = point_x;
-		p.point.y = point_y;
-		p.point.z = 0;
-		fix_point_pub_.publish(p);
 	}
 
 	inline int SensorFusion::from2dPolarIndexTo1d(const int seg, const int bin)

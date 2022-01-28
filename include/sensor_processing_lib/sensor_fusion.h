@@ -115,15 +115,14 @@ private:
 	VPointCloud::Ptr pcl_ground_plane_;
 	VPointCloud::Ptr pcl_elevated_;
 
-	std::vector< std::vector<int> > polar_measurements_;
 	std::vector<PolarCell> polar_grid_;
 	std::vector<float> whole_grid_probs_;
+	geometry_msgs::PointStamped vehicle_pos_;
 	OccupancyGrid::Ptr occ_grid_;
 
 	// Publisher
 	ros::Publisher grid_occupancy_pub_;
-	ros::Publisher point_pub_;
-	ros::Publisher fix_point_pub_;
+	ros::Publisher vehicle_pos_pub_;
 
 	// Subscriber
 	Subscriber<PointCloud2> cloud_sub_;
@@ -135,27 +134,25 @@ private:
 	// Class functions
 	void processPointCloud(const PointCloud2::ConstPtr & cloud);
 
-	void fromLocalOgmToFinalOgm(const int local_grid_x, 
-		const int local_grid_y, int & final_grid_index);
+	void fromLocalOgmToFinalOgm(const int local_grid_x, const int local_grid_y, 
+								int &final_grid_index);
 	
 	void calculateTransMatrix();
-
-	void fixedPoint(const int grid_x, const int grid_y);
 
 	// Conversion functions
 	inline int from2dPolarIndexTo1d(const int seg, const int bin);
 
 	void fromVeloCoordsToPolarCell(const float x, const float y, 
-	int & seg, int & polar_id, float & mag);
+								  int &seg, int &polar_id, float &mag);
 	
 	void fromPolarCellToVeloCoords(const int seg, const int bin,
-		float & x, float & y);
+								  float &x, float &y);
 	
-	void fromLocalGridToFinalCartesian(const int grid_x, const int grid_y,
-		float & x, float & y);
+	void fromLocalGridToGlobalCartesian(const int grid_x, const int grid_y,
+										float &global_x, float &global_y);
 	
 	void fromFinalCartesianToGridIndex(const float x, const float y, 
-		int & grid_index);
+									   int &grid_index);
 };
 
 } // namespace sensor_processing
