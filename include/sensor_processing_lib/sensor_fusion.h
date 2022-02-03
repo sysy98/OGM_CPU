@@ -78,8 +78,8 @@ struct PolarCell{
 	// Default constructor.
 	PolarCell():
 		z_min(0), z_max(0), height(0), dist(0), count(0), 
-		elevated_count(0), p_occ(0), p_free(0), p_final(0), 
-		p_logit(0)
+		elevated_count(0), p_occ(0.0), p_free(0.5), p_final(0.45), 
+		p_logit(0.0)
 	{}
 };
 
@@ -113,6 +113,7 @@ private:
 
 	VPointCloud::Ptr pcl_in_;
 	VPointCloud::Ptr pcl_ground_plane_;
+    VPointCloud::Ptr pcl_ground_;
 	VPointCloud::Ptr pcl_elevated_;
 
 	std::vector<PolarCell> polar_grid_;
@@ -121,6 +122,9 @@ private:
 	OccupancyGrid::Ptr occ_grid_;
 
 	// Publisher
+    ros::Publisher cloud_filtered_pub_;
+	ros::Publisher cloud_ground_pub_;
+    ros::Publisher cloud_elevated_pub_;
 	ros::Publisher grid_occupancy_pub_;
 	ros::Publisher vehicle_pos_pub_;
 

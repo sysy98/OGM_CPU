@@ -26,6 +26,7 @@ namespace sensor_processing
 																				 private_nh_(private_nh),
 																				 pcl_in_(new VPointCloud),
 																				 pcl_ground_plane_(new VPointCloud),
+																				 pcl_ground_(new VPointCloud),
 																				 pcl_elevated_(new VPointCloud),
 																				 cloud_sub_(nh, "/kitti/velo/pointcloud", 10),
 																				 tf_listener_(buffer_),
@@ -138,6 +139,12 @@ namespace sensor_processing
 		}
 
 		// Define Publisher
+		cloud_filtered_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+            "/sensor/cloud/filtered", 2);
+		cloud_ground_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+            "/sensor/cloud/ground", 2);
+		cloud_elevated_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+			"/sensor/cloud/elevated", 2);
 		grid_occupancy_pub_ = nh_.advertise<OccupancyGrid>(
 			"/sensor/grid/occupancy", 2);
 		vehicle_pos_pub_ = nh_.advertise<PointStamped>(
@@ -257,6 +264,7 @@ namespace sensor_processing
 		// Publish filtered cloud
 		pcl_in_->header.frame_id = cloud->header.frame_id;
 		pcl_in_->header.stamp = pcl_conversions::toPCL(cloud->header.stamp);
+    	cloud_filtered_pub_.publish(pcl_in_);
 
 		/******************************************************************************
  * 2. Ground plane estimation and dividing point cloud in elevated and ground
@@ -366,10 +374,21 @@ namespace sensor_processing
 			{
 				pcl_elevated_->points.push_back(point);
 			}
+			else
+			{
+				pcl_ground_->points.push_back(point);
+			}
 		}
 
+		// Publish ground cloud
+		pcl_ground_->header.frame_id = cloud->header.frame_id;
+		pcl_ground_->header.stamp = pcl_conversions::toPCL(cloud->header.stamp);
+		cloud_ground_pub_.publish(pcl_ground_);
+
+		// Publish elevated cloud
 		pcl_elevated_->header.frame_id = cloud->header.frame_id;
 		pcl_elevated_->header.stamp = pcl_conversions::toPCL(cloud->header.stamp);
+		cloud_elevated_pub_.publish(pcl_elevated_);
 
 		// Print point cloud information
     	ROS_INFO("Point Cloud [%d] # Total points [%d] # Elevated points [%d] ",
@@ -400,8 +419,7 @@ namespace sensor_processing
 				int tmp_polar_id = from2dPolarIndexTo1d(seg, j);
 				PolarCell &cell = polar_grid_[tmp_polar_id];
 
-				float alpha = 1;
-				float delta = 0.25;
+				float alpha{1}, delta{0.25};
 				float occ_value = alpha / sqrt(2 * M_PI * delta) *
 							  exp(-pow(cell.dist - point_dist, 2) / (2 * pow(delta, 2)));
 				cell.p_occ += occ_value;
