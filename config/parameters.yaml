@@ -1,11 +1,11 @@
 grid:
   range:
-    min: 3.0
+    min: 2.0
     max: 80.0
   cell:
     size: 0.25
     height: 0.15
-  segments: 1100
+  segments: 1000
 
 ransac:
   tolerance: 0.2

@@ -30,8 +30,10 @@ namespace sensor_processing
 																				 pcl_elevated_(new VPointCloud),
 																				 cloud_sub_(nh, "/kitti/velo/pointcloud", 10),
 																				 tf_listener_(buffer_),
-																				 width_gain_(2),
-																				 height_gain_(1.5)
+																				//  width_gain_(2),
+                                                                        		//  height_gain_(1.8)
+																				 width_gain_(2.8),
+																				 height_gain_(3.8)
 	{
 
 		// Get data path
@@ -59,22 +61,19 @@ namespace sensor_processing
 		}
 
 		// Define lidar parameters
-		private_nh_.param("lidar/height", params_.lidar_height,
-						  params_.lidar_height);
-		private_nh_.param("lidar/z_min", params_.lidar_z_min,
-						  params_.lidar_z_min);
+		private_nh_.param<float>("lidar/height", params_.lidar_height, -1.73);
+		private_nh_.param<float>("lidar/z_min", params_.lidar_z_min, -2.4);
 
-		// Define grid parameters
-		private_nh_.param("grid/range/min", params_.grid_range_min,
-						  params_.grid_range_min);
-		private_nh_.param("grid/range/max", params_.grid_range_max,
-						  params_.grid_range_max);
-		private_nh_.param("grid/cell/size", params_.grid_cell_size,
-						  params_.grid_cell_size);
-		private_nh_.param("grid/cell/height", params_.grid_cell_height,
-						  params_.grid_cell_height);
-		private_nh_.param("grid/segments", params_.grid_segments,
-						  params_.grid_segments);
+		// Define local grid map parametersI
+		private_nh_.param<float>("grid/range/min", params_.grid_range_min, 2.0);
+		private_nh_.param<float>("grid/range/max", params_.grid_range_max, 80.0);
+		private_nh_.param<float>("grid/cell/size", params_.grid_cell_size, 0.25);
+		private_nh_.param<float>("grid/cell/height", params_.grid_cell_height, 0.25);
+		private_nh_.param<int>("grid/segments", params_.grid_segments, 1040);
+
+		// Define ransac ground plane parameters
+		private_nh_.param<float>("ransac/tolerance", params_.ransac_tolerance, 0.2);
+		private_nh_.param<int>("ransac/iterations", params_.ransac_iterations, 50);
 
 		params_.grid_bins = (params_.grid_range_max * std::sqrt(2)) /
 								params_.grid_cell_size + 1;
@@ -83,12 +82,6 @@ namespace sensor_processing
 		// 360-degree grid map
 		params_.height_grid = params_.grid_range_max / params_.grid_cell_size * 2;
 		params_.width_grid = params_.height_grid;
-
-		// Define ransac ground plane parameters
-		private_nh_.param("ransac/tolerance", params_.ransac_tolerance,
-						  params_.ransac_tolerance);
-		private_nh_.param("ransac/iterations", params_.ransac_iterations,
-						  params_.ransac_iterations);
 
 		// Define static conversion values
 		params_.inv_angular_res = params_.grid_segments / (2 * M_PI);
@@ -130,14 +123,21 @@ namespace sensor_processing
 		occ_grid_->info.origin.orientation.y = 0;
 		occ_grid_->info.origin.orientation.z = 0;
 
-		whole_grid_probs_ = std::vector<float>(params_.occ_height_grid * params_.occ_width_grid, 0.0);
+		global_grid_logit_probs_ = std::vector<float>(params_.occ_height_grid * params_.occ_width_grid, 0.0);
+		bins_distance_ = std::vector<float>(params_.grid_bins, 0.0);
+
+		// Calculate distance between each bin and the origin of lidar.
+		for (int b = 0; b < params_.grid_bins; ++b)
+		{
+			bins_distance_[b] = float(b) / params_.inv_radial_res + params_.grid_cell_size / 2;
+		}
 
 		// Init occupancy grid
 		for (int i = 0; i < params_.occ_width_grid * params_.occ_height_grid; ++i)
 		{
 			occ_grid_->data[i] = -1;
 		}
-
+		
 		// Define Publisher
 		cloud_filtered_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
             "/sensor/cloud/filtered", 2);
@@ -332,9 +332,6 @@ namespace sensor_processing
 				PolarCell &cell = polar_grid_[polar_id];
 				float x, y;
 
-				//Calcluate distance between the cell and the origin of lidar
-				cell.dist = b / params_.inv_radial_res + params_.grid_cell_size / 2;
-
 				fromPolarCellToVeloCoords(s, b, x, y);
 
 				//Get ground height
@@ -381,14 +378,14 @@ namespace sensor_processing
 		}
 
 		// Publish ground cloud
-		pcl_ground_->header.frame_id = cloud->header.frame_id;
-		pcl_ground_->header.stamp = pcl_conversions::toPCL(cloud->header.stamp);
-		cloud_ground_pub_.publish(pcl_ground_);
+		// pcl_ground_->header.frame_id = cloud->header.frame_id;
+		// pcl_ground_->header.stamp = pcl_conversions::toPCL(cloud->header.stamp);
+		// cloud_ground_pub_.publish(pcl_ground_);
 
-		// Publish elevated cloud
+		// // Publish elevated cloud
 		pcl_elevated_->header.frame_id = cloud->header.frame_id;
 		pcl_elevated_->header.stamp = pcl_conversions::toPCL(cloud->header.stamp);
-		cloud_elevated_pub_.publish(pcl_elevated_);
+		// cloud_elevated_pub_.publish(pcl_elevated_);
 
 		// Print point cloud information
     	ROS_INFO("Point Cloud [%d] # Total points [%d] # Elevated points [%d] ",
@@ -398,6 +395,11 @@ namespace sensor_processing
  * 4. Use elevated point cloud to calculate occupied probability of cells in polar grid
  */
 		auto main_part_start = std::chrono::high_resolution_clock::now();
+
+		int max_num_points_per_seg = ceil(360.0 / params_.grid_segments / 0.174) * 64;
+
+		std::vector<int> points_in_seg_count(params_.grid_segments, 0);
+		std::vector<float> point_distance_in_segs(params_.grid_segments * max_num_points_per_seg, 0.0);
 
 		for (int i = 0; i < pcl_elevated_->size(); ++i)
 		{
@@ -410,70 +412,63 @@ namespace sensor_processing
 			float point_dist;
 
 			fromVeloCoordsToPolarCell(point.x, point.y, seg, polar_id, point_dist);
-			PolarCell &cell = polar_grid_[polar_id];
-			cell.elevated_count++;
-		
-			// Calculate p_occ with the normal distribuiton.
-			for (int j = 0; j < params_.grid_bins; ++j)
-			{
-				int tmp_polar_id = from2dPolarIndexTo1d(seg, j);
-				PolarCell &cell = polar_grid_[tmp_polar_id];
+			int count = ++points_in_seg_count[seg];
+			if(count < max_num_points_per_seg){
 
-				float alpha{1}, delta{0.25};
-				float occ_value = alpha / sqrt(2 * M_PI * delta) *
-							  exp(-pow(cell.dist - point_dist, 2) / (2 * pow(delta, 2)));
-				cell.p_occ += occ_value;
+				int ind = seg * max_num_points_per_seg + count;
+				point_distance_in_segs[ind] = point_dist;
 			}
 		}
 
-		for (int i = 0; i < params_.grid_segments; ++i)
+		for (int s = 0; s < params_.grid_segments; ++s)
 		{
-
-			bool has_obstacle_this_seg = false;
-			int first_occ_cell_bin{-1};
-
-			for (int j = 0; j < params_.grid_bins; ++j)
+			for (int b = 0; b < params_.grid_bins; ++b)
 			{
-				int polar_id = from2dPolarIndexTo1d(i, j);
+				int count = points_in_seg_count[s];
+
+				int polar_id = from2dPolarIndexTo1d(s, b);
+
+				// Grab cell
 				PolarCell &cell = polar_grid_[polar_id];
+				
+				if(count > 0){
 
-				// Perform nonlinear normalization of p_occ in the range of 0-1.
-				cell.p_occ = std::atan(cell.p_occ) * 2 / M_PI;
+					float lo_up{log(0.96 / 0.04)};
+					float lo_low{log(0.01 / 0.99)};
 
-				if (cell.elevated_count && !has_obstacle_this_seg)
-				{
-					first_occ_cell_bin = j;
-					has_obstacle_this_seg = true;
+					const float bin_distance = bins_distance_[b];
+
+					float temp_init_free_p{0.4}, temp_occ_p{0.0}, temp_lo{0.0};
+					float temp_free_p;
+
+					// free_p = 0.001 * dis + 0.35, dis < 50, free_p = 0.4, dis >= 50 m
+					if (bin_distance < 50.0) {
+						temp_init_free_p = float(0.35 + 0.001 * bin_distance);
+        			}
+
+					for (int i = 0; i < count; i++) { 
+
+						int point_id = s * max_num_points_per_seg + i;
+
+            			temp_occ_p = 0.5 + 1.2 * (0.35 - abs(bin_distance - point_distance_in_segs[point_id]));
+
+						if (bin_distance > point_distance_in_segs[point_id] + 0.125) {
+							temp_free_p = 0.5; // bin after the measurement should be unknown
+
+						} else {
+							temp_free_p = temp_init_free_p;
+						}
+
+						float temp_p = fmax(temp_occ_p, temp_free_p);
+						temp_lo += log(temp_p / (1 - temp_p));
+						// 0.04 < p < 0.99
+						temp_lo = fmax(lo_low, fmin(lo_up, temp_lo));
+					}
+					
+					cell.p_logit = temp_lo;
+				}else {
+					cell.p_logit = log(0.3/0.7);
 				}
-
-				// p_free
-				if (cell.dist < params_.grid_range_min)
-				{
-					cell.p_free = 0.4 * params_.grid_range_min / params_.grid_range_max;
-				}
-				else if (cell.dist <= params_.grid_range_max)
-				{
-					cell.p_free = 0.4 * cell.dist / params_.grid_range_max;
-				}
-			}
-
-			if (!has_obstacle_this_seg)
-				continue;
-
-			for (int j = 0; j < params_.grid_bins; ++j)
-			{
-
-				int polar_id = from2dPolarIndexTo1d(i, j);
-				PolarCell &cell = polar_grid_[polar_id];
-
-				//The probability of the cell behind the first detected object is unknown(0.5).
-				if (j > first_occ_cell_bin)
-				{
-					cell.p_free = 0.5;
-				}
-
-				cell.p_final = max(cell.p_occ, cell.p_free);
-				cell.p_logit = log(cell.p_final / (1 - cell.p_final));
 			}
 		}
 		/******************************************************************************
@@ -487,6 +482,8 @@ namespace sensor_processing
 			float y1 = -params_.grid_range_max + params_.grid_cell_size / 2;
 			for (int j = 0; j < params_.width_grid; ++j, y1 += params_.grid_cell_size)
 			{
+				float lo_up{log(0.99 / 0.01)};
+        		float lo_low{log(0.04 / 0.96)};
 
 				//Buffer variables
 				int seg, polar_id;
@@ -498,25 +495,26 @@ namespace sensor_processing
 				PolarCell &cell = polar_grid_[polar_id];
 
 				// Calculate occupancy grid cell index
-				int final_grid_index;
+				int final_cartesian_id;
 
-				fromLocalOgmToFinalOgm(i, j, final_grid_index);
+				fromLocalOgmToFinalOgm(i, j, final_cartesian_id);
 
-				whole_grid_probs_[final_grid_index] += cell.p_logit;
+				// 0.04 < p < 0.99
+				float cell_lo_past = global_grid_logit_probs_[final_cartesian_id];
+				float final_lo = fmax(lo_low, fmin(lo_up, cell_lo_past + cell.p_logit));
+				global_grid_logit_probs_[final_cartesian_id] = final_lo;
 
-				float final_prob = whole_grid_probs_[final_grid_index];
-
-				if (final_prob == 0)
+				if (fabs(final_lo) <= 1e-5)
 				{
-					occ_grid_->data[final_grid_index] = -1;
+					occ_grid_->data[final_cartesian_id] = -1;
 				}
-				else if (final_prob < 0)
+				else if (final_lo < 0.0)
 				{
-					occ_grid_->data[final_grid_index] = 0;
+					occ_grid_->data[final_cartesian_id] = 0;
 				}
 				else
 				{
-					occ_grid_->data[final_grid_index] = 100;
+					occ_grid_->data[final_cartesian_id] = 100;
 				}
 			}
 		}
@@ -567,12 +565,12 @@ namespace sensor_processing
 	}
 
 	void SensorFusion::fromLocalOgmToFinalOgm(const int local_grid_x,
-											  const int local_grid_y, int &final_grid_index)
+											  const int local_grid_y, int &final_cartesian_id)
 	{
 
 		float final_x, final_y;
 		fromLocalGridToGlobalCartesian(local_grid_x, local_grid_y, final_x, final_y);
-		fromFinalCartesianToGridIndex(final_x, final_y, final_grid_index);
+		fromFinalCartesianToGridIndex(final_x, final_y, final_cartesian_id);
 	}
 
 	void SensorFusion::fromLocalGridToGlobalCartesian(const int grid_x, const int grid_y,

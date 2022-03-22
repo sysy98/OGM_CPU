@@ -77,9 +77,8 @@ struct PolarCell{
 
 	// Default constructor.
 	PolarCell():
-		z_min(0), z_max(0), height(0), dist(0), count(0), 
-		elevated_count(0), p_occ(0.0), p_free(0.5), p_final(0.45), 
-		p_logit(0.0)
+		z_min(0), z_max(0), height(0), count(0), 
+		p_occ(0.0), p_free(0.5), p_logit(log(0.1 / 0.9))
 	{}
 };
 
@@ -117,7 +116,8 @@ private:
 	VPointCloud::Ptr pcl_elevated_;
 
 	std::vector<PolarCell> polar_grid_;
-	std::vector<float> whole_grid_probs_;
+	std::vector<float> bins_distance_;
+	std::vector<float> global_grid_logit_probs_;
 	geometry_msgs::PointStamped vehicle_pos_;
 	OccupancyGrid::Ptr occ_grid_;
 
